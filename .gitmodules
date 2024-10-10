@@ -1,0 +1,9 @@
+[submodule "vender/glfw"]
+	path = vender/glfw
+	url = https://github.com/glfw/glfw.git
+[submodule "vender/spdlog"]
+	path = vender/spdlog
+	url = https://github.com/gabime/spdlog.git
+[submodule "vender/tinygltf"]
+	path = vender/tinygltf
+	url = https://github.com/syoyo/tinygltf.git
