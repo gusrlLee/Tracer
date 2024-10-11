@@ -5,6 +5,7 @@ int main()
 {
     auto app = make<MtApplication>();
     app->prepare();
+    app->test();
     app->run();
     app->release();
     return 0;

@@ -30,7 +30,7 @@ void MtPathTracer::prepare(MTL::Device* pDevice)
     {
         throw std::runtime_error("Failed to load glTF Data.. Try again! :-(");
     }
-
+    
     debugModel(model);
 }
 

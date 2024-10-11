@@ -8,12 +8,13 @@ class MtApplication {
         void prepare();
         void run();
         void release();
+        void test();
+
 
     private:
         void buildBasicRenderQuadShader();
         void buildRenderFrame();
         void renderQuad(MTL::CommandBuffer* pCmb);
-        void test();
 
         MTL::Device* m_pDevice;
         ref<MtWindow> m_window;
