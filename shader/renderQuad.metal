@@ -31,8 +31,7 @@ float4 copyFragment(CopyVertexOut in [[stage_in]],
 {
     constexpr sampler sam(min_filter::nearest, mag_filter::nearest, mip_filter::none);
 
-    //float3 color = tex.sample(sam, in.uv).xyz;
-    //color = color / (1.0f + color);
-    float3 color = float3(0.0f, 0.0f, 1.0f);
+    float3 color = tex.sample(sam, in.uv).xyz;
+    // color = color / (1.0f + color);
     return float4(color, 1.0f);
 }

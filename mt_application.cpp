@@ -17,9 +17,11 @@ void MtApplication::prepare()
     m_queue = m_pDevice->newCommandQueue()->retain();
 
     // Render Quad 
-//    buildBasicRenderQuadShader();
+    buildBasicRenderQuadShader();
     // Render Frame
     buildRenderFrame();
+    // Build path tracer
+    buildPathTracePipeline();
 }
 
 void MtApplication::run() 
@@ -31,9 +33,17 @@ void MtApplication::run()
         NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
         MTL::CommandBuffer* pCmb = m_queue->commandBuffer();
         bIsDrawable = m_window->nextDrawable();
-
         
-
+        MTL::ComputeCommandEncoder* pComputeEncoder = pCmb->computeCommandEncoder();
+        pComputeEncoder->setComputePipelineState(m_pPathTracePipelineState);
+        pComputeEncoder->setTexture(m_renderFrame, 0);
+        
+        MTL::Size gridSize = MTL::Size(m_window->getWidth(), m_window->getHeight(), 1);
+        NS::UInteger threadGroupSize = m_pPathTracePipelineState->maxTotalThreadsPerThreadgroup();
+        MTL::Size threadgroupSize( threadGroupSize, 1, 1 );
+        pComputeEncoder->dispatchThreads(gridSize, threadgroupSize);
+        pComputeEncoder->endEncoding();
+    
         MTL::RenderPassDescriptor* pRpd = m_window->getCurrentRenderPassDiscriptor(bIsDrawable);
         MTL::RenderCommandEncoder* pEnc = pCmb->renderCommandEncoder(pRpd);
         {
@@ -63,6 +73,15 @@ void MtApplication::buildRenderFrame()
     MTL::Texture *pTexture = m_pDevice->newTexture( pTextureDesc );
     m_renderFrame = pTexture;
     pTextureDesc->release();
+
+    MTL::TextureDescriptor* pPathTraceTextureDesc = MTL::TextureDescriptor::alloc()->init();
+    pPathTraceTextureDesc->setWidth(m_window->getWidth());
+    pPathTraceTextureDesc->setHeight(m_window->getHeight());
+    pPathTraceTextureDesc->setPixelFormat(m_window->getFormat());
+
+    MTL::Texture *pPathTraceTexture = m_pDevice->newTexture( pPathTraceTextureDesc );
+    m_renderPathTracingSceneData = pPathTraceTexture;
+    pPathTraceTextureDesc->release();
 }
 
 void MtApplication::buildBasicRenderQuadShader() 
@@ -112,6 +131,7 @@ void MtApplication::renderQuad(MTL::CommandBuffer* pCmb)
 
 void MtApplication::release()
 {
+    m_renderPathTracingSceneData->release();
     m_renderFrame->release();
     m_pRenderQuadLibrary->release();
     m_queue->release();
@@ -119,71 +139,95 @@ void MtApplication::release()
     m_pDevice->release();
 }
 
+void MtApplication::buildPathTracePipeline()
+{   
+    std::string kernelShaderSrc = readShaderFile("../Shader/tracer.metal");
+    
+    NS::Error* pError = nullptr;
+    MTL::Library* pComputeLibrary = m_pDevice->newLibrary(NS::String::string(kernelShaderSrc.c_str(), NS::ASCIIStringEncoding), nullptr, &pError);
+    if (!pComputeLibrary)
+    {
+        std::cout << pError->localizedDescription()->utf8String() << std::endl;
+        throw std::runtime_error("Failed to create shader library :-(");
+    }
+
+    MTL::Function* pPathTracingFunction = pComputeLibrary->newFunction(NS::String::string("pathTrace", NS::ASCIIStringEncoding));
+    m_pPathTracePipelineState = m_pDevice->newComputePipelineState(pPathTracingFunction, &pError);
+    if (!m_pPathTracePipelineState)
+    {
+        std::cout << pError->localizedDescription()->utf8String() << std::endl;
+        throw std::runtime_error("Failed to create compute pipeline state!");
+    }
+    
+    pPathTracingFunction->release();
+    pComputeLibrary->release();
+}
+
 void MtApplication::test() 
 {
-    std::vector<simd::float3> triangleVertices;
-    triangleVertices.push_back(simd::make_float3(-0.5f, -0.5f, 0.0f ));
-    triangleVertices.push_back(simd::make_float3( 0.5f, -0.5f, 0.0f ));
-    triangleVertices.push_back(simd::make_float3( 0.0f,  0.5f, 0.0f ));
-
-    std::vector<uint32_t> indices = { 0, 1, 2 };
-
-    // Buffer define
-    MTL::Buffer* triangleBuffer = m_pDevice->newBuffer(&triangleVertices, triangleVertices.size() * sizeof(simd::float3), MTL::ResourceStorageModeShared);
-    MTL::Buffer* triangleIndicesBuffer = m_pDevice->newBuffer(&indices, indices.size() * sizeof(uint32_t), MTL::ResourceStorageModeShared);
-    
-    // Define Acceleration structure triangle geometry descriptor
-    MTL::AccelerationStructureTriangleGeometryDescriptor* triangleDesc = MTL::AccelerationStructureTriangleGeometryDescriptor::alloc()->init();
-    
-    triangleDesc->setIndexBuffer(triangleIndicesBuffer);
-    triangleDesc->setIndexType(MTL::IndexTypeUInt32);
-    triangleDesc->setVertexBuffer(triangleBuffer);
-    triangleDesc->setVertexStride(sizeof(simd::float3));
-    NS::UInteger triangleCount = (indices.size() / 3);
-    triangleDesc->setTriangleCount(triangleCount);
-    NS::UInteger tableOffset = 0;
-    triangleDesc->setIntersectionFunctionTableOffset(tableOffset);
-    
-    NS::Array* descArr = NS::Array::array(triangleDesc);
-    
-    // Define Acceleration structure descriptor (different!!)
-    MTL::PrimitiveAccelerationStructureDescriptor* accelDesc = MTL::PrimitiveAccelerationStructureDescriptor::alloc()->init();
-    accelDesc->setGeometryDescriptors(descArr);
-
-    // Create Acceleration Structure!
-    MTL::AccelerationStructureSizes sizes = m_pDevice->accelerationStructureSizes(accelDesc);
-    
-    MTL::AccelerationStructure* accelerationStructure = m_pDevice->newAccelerationStructure(sizes.accelerationStructureSize);
-    MTL::Buffer* scratchBuffer = m_pDevice->newBuffer(sizes.buildScratchBufferSize, MTL::ResourceStorageModeShared);
-    
-    MTL::CommandBuffer* accelCmdbuf = m_queue->commandBuffer();
-    MTL::AccelerationStructureCommandEncoder* accelCmdEncoder = accelCmdbuf->accelerationStructureCommandEncoder();
-    
-    MTL::Buffer* compactSizeBuffer = m_pDevice->newBuffer(sizeof(uint32_t), MTL::ResourceStorageModeShared);
-    
-    accelCmdEncoder->buildAccelerationStructure(accelerationStructure,
-                                                accelDesc,
-                                                scratchBuffer,
-                                                0);
-    
-    accelCmdEncoder->writeCompactedAccelerationStructureSize(accelerationStructure,
-                                                             compactSizeBuffer,
-                                                             0);
-    
-    accelCmdEncoder->endEncoding();
-    accelCmdbuf->commit();
-    accelCmdbuf->waitUntilCompleted();
-    
-    uint32_t compactedSize = *(uint32_t*)compactSizeBuffer->contents();
-    
-    MTL::AccelerationStructure* compactedAccelerationStructure = m_pDevice->newAccelerationStructure(compactedSize);
-    
-    MTL::CommandBuffer* compactedAccelCmdbuf = m_queue->commandBuffer();
-    MTL::AccelerationStructureCommandEncoder* compactedAccelCmdEncoder = compactedAccelCmdbuf->accelerationStructureCommandEncoder();
-    compactedAccelCmdEncoder->copyAndCompactAccelerationStructure(accelerationStructure,
-                                                                  compactedAccelerationStructure);
-    compactedAccelCmdEncoder->endEncoding();
-    compactedAccelCmdbuf->commit();
-    std::cout << compactedAccelerationStructure->size() << std::endl;
+//    std::vector<simd::float3> triangleVertices;
+//    triangleVertices.push_back(simd::make_float3(-0.5f, -0.5f, 0.0f ));
+//    triangleVertices.push_back(simd::make_float3( 0.5f, -0.5f, 0.0f ));
+//    triangleVertices.push_back(simd::make_float3( 0.0f,  0.5f, 0.0f ));
+//
+//    std::vector<uint32_t> indices = { 0, 1, 2 };
+//
+//    // Buffer define
+//    MTL::Buffer* triangleBuffer = m_pDevice->newBuffer(&triangleVertices, triangleVertices.size() * sizeof(simd::float3), MTL::ResourceStorageModeShared);
+//    MTL::Buffer* triangleIndicesBuffer = m_pDevice->newBuffer(&indices, indices.size() * sizeof(uint32_t), MTL::ResourceStorageModeShared);
+//    
+//    // Define Acceleration structure triangle geometry descriptor
+//    MTL::AccelerationStructureTriangleGeometryDescriptor* triangleDesc = MTL::AccelerationStructureTriangleGeometryDescriptor::alloc()->init();
+//    
+//    triangleDesc->setIndexBuffer(triangleIndicesBuffer);
+//    triangleDesc->setIndexType(MTL::IndexTypeUInt32);
+//    triangleDesc->setVertexBuffer(triangleBuffer);
+//    triangleDesc->setVertexStride(sizeof(simd::float3));
+//    NS::UInteger triangleCount = (indices.size() / 3);
+//    triangleDesc->setTriangleCount(triangleCount);
+//    NS::UInteger tableOffset = 0;
+//    triangleDesc->setIntersectionFunctionTableOffset(tableOffset);
+//    
+//    NS::Array* descArr = NS::Array::array(triangleDesc, 1);
+//    
+//    // Define Acceleration structure descriptor (different!!)
+//    MTL::PrimitiveAccelerationStructureDescriptor* accelDesc = MTL::PrimitiveAccelerationStructureDescriptor::alloc()->init();
+//    accelDesc->setGeometryDescriptors(descArr);
+//
+//    // Create Acceleration Structure!
+//    MTL::AccelerationStructureSizes sizes = m_pDevice->accelerationStructureSizes(accelDesc);
+//    
+//    MTL::AccelerationStructure* accelerationStructure = m_pDevice->newAccelerationStructure(sizes.accelerationStructureSize);
+//    MTL::Buffer* scratchBuffer = m_pDevice->newBuffer(sizes.buildScratchBufferSize, MTL::ResourceStorageModeShared);
+//    
+//    MTL::CommandBuffer* accelCmdbuf = m_queue->commandBuffer();
+//    MTL::AccelerationStructureCommandEncoder* accelCmdEncoder = accelCmdbuf->accelerationStructureCommandEncoder();
+//    
+//    MTL::Buffer* compactSizeBuffer = m_pDevice->newBuffer(sizeof(uint32_t), MTL::ResourceStorageModeShared);
+//    
+//    accelCmdEncoder->buildAccelerationStructure(accelerationStructure,
+//                                                accelDesc,
+//                                                scratchBuffer,
+//                                                0);
+//    
+//    accelCmdEncoder->writeCompactedAccelerationStructureSize(accelerationStructure,
+//                                                             compactSizeBuffer,
+//                                                             0);
+//    
+//    accelCmdEncoder->endEncoding();
+//    accelCmdbuf->commit();
+//    accelCmdbuf->waitUntilCompleted();
+//    
+//    uint32_t compactedSize = *(uint32_t*)compactSizeBuffer->contents();
+//    
+//    MTL::AccelerationStructure* compactedAccelerationStructure = m_pDevice->newAccelerationStructure(compactedSize);
+//    
+//    MTL::CommandBuffer* compactedAccelCmdbuf = m_queue->commandBuffer();
+//    MTL::AccelerationStructureCommandEncoder* compactedAccelCmdEncoder = compactedAccelCmdbuf->accelerationStructureCommandEncoder();
+//    compactedAccelCmdEncoder->copyAndCompactAccelerationStructure(accelerationStructure,
+//                                                                  compactedAccelerationStructure);
+//    compactedAccelCmdEncoder->endEncoding();
+//    compactedAccelCmdbuf->commit();
+//    std::cout << compactedAccelerationStructure->size() << std::endl;
     
 }
